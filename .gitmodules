@@ -1,0 +1,6 @@
+[submodule "ios-sdk"]
+	path = ios-sdk
+	url = https://github.com/Acuant/iOSSDKV11.git
+[submodule "android-sdk"]
+	path = android-sdk
+	url = https://github.com/Acuant/AndroidSDKV11.git
