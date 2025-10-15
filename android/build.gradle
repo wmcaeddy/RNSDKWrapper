@@ -62,14 +62,14 @@ dependencies {
   implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
 
   // Acuant SDK dependencies (v11.6.3)
-  // Only include modules needed for Phase 1: Face Recognition & Identity Verification
+  // Phase 1: Face Recognition & Identity Verification
   implementation 'com.acuant:acuantcommon:11.6.3'
   implementation 'com.acuant:acuantfacecapture:11.6.3'
   implementation 'com.acuant:acuantpassiveliveness:11.6.3'
   implementation 'com.acuant:acuantfacematch:11.6.3'
   implementation 'com.acuant:acuantimagepreparation:11.6.3'
 
-  // Note: Document processing modules will be added in Phase 2:
-  // - acuantcamera
-  // - acuantdocumentprocessing
+  // Phase 2: Document Scanning and OCR
+  implementation 'com.acuant:acuantcamera:11.6.3'
+  implementation 'com.acuant:acuantdocumentprocessing:11.6.3'
 }

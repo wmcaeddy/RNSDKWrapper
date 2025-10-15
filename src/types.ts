@@ -104,23 +104,42 @@ export interface FaceMatchResult {
 }
 
 // ============================================================================
-// Document Capture Types (for future Phase 2)
+// Document Capture Types (Phase 2)
 // ============================================================================
 
-export enum DocumentSide {
-  Front = 'Front',
-  Back = 'Back',
+export enum DocumentType {
+  Auto = 'Auto',
+  ID = 'ID',
+  Passport = 'Passport',
+  DriverLicense = 'DriverLicense',
 }
 
 export interface DocumentCaptureOptions {
-  autoCapture?: boolean;
-  showDetectionBox?: boolean;
+  documentType?: DocumentType;
 }
 
-export interface DocumentCaptureResult {
-  imageData: string; // Base64 encoded
-  barcodeString?: string;
-  imageUri?: string;
+export interface DocumentResult {
+  // Captured images
+  frontImage: string; // Base64 encoded
+  backImage?: string; // Base64 encoded (optional for passport)
+
+  // OCR extracted data (flat structure - no nesting)
+  fullName?: string;
+  firstName?: string;
+  lastName?: string;
+  dateOfBirth?: string;
+  documentNumber?: string;
+  expirationDate?: string;
+  issueDate?: string;
+  address?: string;
+  country?: string;
+  nationality?: string;
+  sex?: string;
+
+  // Metadata
+  documentType: string; // Actual type returned by SDK
+  isProcessed: boolean; // true if OCR succeeded
+  classificationDetails?: string; // Additional classification info
 }
 
 // ============================================================================

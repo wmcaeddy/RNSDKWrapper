@@ -1,6 +1,7 @@
 /**
  * Acuant SDK React Native Wrapper
  * Phase 1: Face Recognition and Identity Verification
+ * Phase 2: Document Scanning and OCR
  *
  * Design Philosophy (Linus Torvalds principles):
  * 1. Simple, direct mapping to native SDK - no unnecessary abstraction
@@ -18,6 +19,8 @@ import type {
   PassiveLivenessResult,
   FaceMatchRequest,
   FaceMatchResult,
+  DocumentCaptureOptions,
+  DocumentResult,
   AcuantError,
 } from './types';
 
@@ -118,6 +121,29 @@ export async function processFaceMatch(
 }
 
 // ============================================================================
+// Document Capture and Processing (Phase 2)
+// ============================================================================
+
+/**
+ * Capture and process a document in one call
+ *
+ * Launches camera UI to capture document images (front/back),
+ * then automatically processes them to extract OCR data.
+ *
+ * This is the simplest workflow - one method does everything.
+ * No need to manually upload images or poll for results.
+ *
+ * @param options - Document capture options
+ * @returns Promise with document images and extracted data
+ * @throws {AcuantError} If capture or processing fails
+ */
+export async function captureAndProcessDocument(
+  options?: DocumentCaptureOptions
+): Promise<DocumentResult> {
+  return AcuantSdk.captureAndProcessDocument(options || {});
+}
+
+// ============================================================================
 // Exports
 // ============================================================================
 
@@ -128,4 +154,5 @@ export default {
   captureFace,
   processPassiveLiveness,
   processFaceMatch,
+  captureAndProcessDocument,
 };

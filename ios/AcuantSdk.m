@@ -35,6 +35,11 @@ RCT_EXTERN_METHOD(processFaceMatch:(NSDictionary *)request
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Document Capture and Processing (Phase 2)
+RCT_EXTERN_METHOD(captureAndProcessDocument:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 + (BOOL)requiresMainQueueSetup
 {
   return NO;

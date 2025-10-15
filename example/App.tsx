@@ -2,10 +2,12 @@
  * Acuant SDK Example App
  *
  * Simple single-screen test app for the Acuant SDK wrapper.
- * Linear workflow: Initialize → Capture Face → Process Liveness → Face Match
+ * Linear workflow:
+ * - Phase 1: Initialize → Capture Face → Process Liveness → Face Match
+ * - Phase 2: Initialize → Capture Document → Display OCR Data
  *
  * Design: Keep it simple. No navigation, no fancy state management.
- * All logic in one file. ~400 lines total.
+ * All logic in one file.
  */
 
 import React, { useState } from 'react';
@@ -28,6 +30,7 @@ import AcuantSdk, {
   type FaceCaptureResult,
   type PassiveLivenessResult,
   type FaceMatchResult,
+  type DocumentResult,
 } from 'react-native-acuant-sdk';
 
 // ============================================================================
@@ -53,6 +56,7 @@ interface AppState {
   faceImage: FaceCaptureResult | null;
   livenessResult: PassiveLivenessResult | null;
   matchResult: FaceMatchResult | null;
+  documentResult: DocumentResult | null;
   isLoading: boolean;
   logs: LogEntry[];
   showConfigModal: boolean;
@@ -70,6 +74,7 @@ export default function App() {
     faceImage: null,
     livenessResult: null,
     matchResult: null,
+    documentResult: null,
     isLoading: false,
     logs: [],
     showConfigModal: false,
@@ -235,6 +240,40 @@ export default function App() {
     addLog('=== Workflow Complete ===', 'success');
   };
 
+  const handleCaptureDocument = async () => {
+    setState((prev) => ({ ...prev, isLoading: true }));
+    addLog('Launching document capture...', 'info');
+
+    try {
+      const result = await AcuantSdk.captureAndProcessDocument({});
+
+      setState((prev) => ({
+        ...prev,
+        documentResult: result,
+        isLoading: false,
+      }));
+
+      const dataFields = [
+        result.fullName,
+        result.documentNumber,
+        result.dateOfBirth,
+      ].filter(Boolean).length;
+
+      addLog(
+        `Document processed successfully. Type: ${result.documentType}, Fields extracted: ${dataFields}`,
+        'success'
+      );
+    } catch (error: any) {
+      setState((prev) => ({ ...prev, isLoading: false }));
+      if (error.message?.includes('cancel')) {
+        addLog('Document capture cancelled by user', 'info');
+      } else {
+        addLog(`Document capture failed: ${error.message || error}`, 'error');
+        Alert.alert('Capture Failed', error.message || String(error));
+      }
+    }
+  };
+
   const handleReset = () => {
     setState((prev) => ({
       ...prev,
@@ -242,6 +281,7 @@ export default function App() {
       faceImage: null,
       livenessResult: null,
       matchResult: null,
+      documentResult: null,
       logs: [],
     }));
     addLog('State reset', 'info');
@@ -425,8 +465,81 @@ export default function App() {
           </View>
         )}
 
+        {/* Document Results (Phase 2) */}
+        {state.documentResult && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Document Result</Text>
+
+            {/* Front Image */}
+            {state.documentResult.frontImage && (
+              <View>
+                <Text style={styles.label}>Front Image</Text>
+                <Image
+                  source={{ uri: `data:image/jpeg;base64,${state.documentResult.frontImage}` }}
+                  style={styles.documentImage}
+                  resizeMode="contain"
+                />
+              </View>
+            )}
+
+            {/* Back Image */}
+            {state.documentResult.backImage && (
+              <View style={{ marginTop: 12 }}>
+                <Text style={styles.label}>Back Image</Text>
+                <Image
+                  source={{ uri: `data:image/jpeg;base64,${state.documentResult.backImage}` }}
+                  style={styles.documentImage}
+                  resizeMode="contain"
+                />
+              </View>
+            )}
+
+            {/* OCR Data */}
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.label}>Extracted Data</Text>
+              <ResultBox label="Document Type" value={state.documentResult.documentType} />
+              <ResultBox
+                label="Processed"
+                value={state.documentResult.isProcessed ? 'YES' : 'NO'}
+                isGood={state.documentResult.isProcessed}
+              />
+              {state.documentResult.fullName && (
+                <ResultBox label="Full Name" value={state.documentResult.fullName} />
+              )}
+              {state.documentResult.firstName && (
+                <ResultBox label="First Name" value={state.documentResult.firstName} />
+              )}
+              {state.documentResult.lastName && (
+                <ResultBox label="Last Name" value={state.documentResult.lastName} />
+              )}
+              {state.documentResult.dateOfBirth && (
+                <ResultBox label="Date of Birth" value={state.documentResult.dateOfBirth} />
+              )}
+              {state.documentResult.documentNumber && (
+                <ResultBox label="Document Number" value={state.documentResult.documentNumber} />
+              )}
+              {state.documentResult.expirationDate && (
+                <ResultBox label="Expiration Date" value={state.documentResult.expirationDate} />
+              )}
+              {state.documentResult.address && (
+                <ResultBox label="Address" value={state.documentResult.address} />
+              )}
+              {state.documentResult.country && (
+                <ResultBox label="Country" value={state.documentResult.country} />
+              )}
+              {state.documentResult.nationality && (
+                <ResultBox label="Nationality" value={state.documentResult.nationality} />
+              )}
+              {state.documentResult.sex && (
+                <ResultBox label="Sex" value={state.documentResult.sex} />
+              )}
+            </View>
+          </View>
+        )}
+
         {/* Action Buttons */}
         <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Phase 1: Face Recognition</Text>
           <ActionButton
             title="Initialize SDK"
             onPress={handleInitialize}
@@ -454,8 +567,18 @@ export default function App() {
 
           <View style={styles.divider} />
 
+          <Text style={styles.sectionTitle}>Phase 2: Document Scanning</Text>
           <ActionButton
-            title="▶️ Run Full Workflow"
+            title="Capture & Process Document"
+            onPress={handleCaptureDocument}
+            disabled={!state.initialized || state.isLoading}
+            loading={state.isLoading}
+          />
+
+          <View style={styles.divider} />
+
+          <ActionButton
+            title="▶️ Run Full Face Workflow"
             onPress={handleRunFullWorkflow}
             disabled={state.isLoading || !state.config}
             loading={state.isLoading}
@@ -670,6 +793,18 @@ const styles = StyleSheet.create({
     height: 300,
     backgroundColor: '#f0f0f0',
     borderRadius: 8,
+  },
+  documentImage: {
+    width: '100%',
+    height: 200,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+  },
+  label: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#666',
+    marginBottom: 8,
   },
   resultBox: {
     flexDirection: 'row',

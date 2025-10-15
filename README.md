@@ -2,8 +2,7 @@
 
 A pragmatic React Native wrapper for Acuant SDK, supporting iOS and Android.
 
-**Current Phase:** 1 - Face Recognition & Identity Verification
-**Status:** Structure Complete, Implementation Ready
+**Current Status:** Phase 2 Complete - Face Recognition + Document Scanning
 **SDK Versions:** iOS 11.6.5 | Android 11.6.3
 
 ---
@@ -12,17 +11,22 @@ A pragmatic React Native wrapper for Acuant SDK, supporting iOS and Android.
 
 This library provides a clean, simple interface to Acuant's identity verification SDKs from React Native applications.
 
-**Phase 1 Features:**
+**Phase 1 Features (Completed):**
 - SDK Initialization (credentials or token-based)
 - Face Capture with native UI
 - Passive Liveness Detection
 - Face Matching (ID photo vs selfie)
 
-**Phase 2 (Future):**
-- Document Capture
-- Document Processing
-- Barcode Reading
-- MRZ Reading
+**Phase 2 Features (Completed):**
+- Document Capture (ID cards, passports, driver licenses)
+- Automatic OCR Data Extraction
+- Image Quality Validation (sharpness, glare)
+- Front/Back Side Capture
+
+**Future Enhancements:**
+- Barcode-only capture mode
+- MRZ (Machine Readable Zone) reading
+- ePassport chip reading
 
 ---
 
@@ -67,6 +71,8 @@ Ensure permissions in `AndroidManifest.xml`:
 
 ## Quick Start
 
+### Phase 1: Face Recognition
+
 ```typescript
 import AcuantSdk from 'react-native-acuant-sdk';
 
@@ -97,6 +103,33 @@ if (livenessResult.assessment === 'Live') {
 
   console.log('Match:', matchResult.isMatch, matchResult.score);
 }
+```
+
+### Phase 2: Document Scanning
+
+```typescript
+import AcuantSdk from 'react-native-acuant-sdk';
+
+// Initialize first (same as Phase 1)
+await AcuantSdk.initialize({
+  credentials: { /* ... */ },
+  region: 'USA'
+});
+
+// Capture and process document (ONE method does everything)
+const docResult = await AcuantSdk.captureAndProcessDocument();
+
+// Access captured images
+console.log('Front image:', docResult.frontImage);  // Base64
+console.log('Back image:', docResult.backImage);     // Base64 (optional)
+
+// Access extracted OCR data
+console.log('Name:', docResult.fullName);
+console.log('DOB:', docResult.dateOfBirth);
+console.log('Doc #:', docResult.documentNumber);
+console.log('Expires:', docResult.expirationDate);
+console.log('Address:', docResult.address);
+console.log('Type:', docResult.documentType);
 ```
 
 ---

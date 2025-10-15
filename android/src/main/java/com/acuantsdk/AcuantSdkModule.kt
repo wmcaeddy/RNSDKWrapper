@@ -24,6 +24,18 @@ import com.acuant.acuantpassiveliveness.model.PassiveLivenessData
 import com.acuant.acuantpassiveliveness.model.PassiveLivenessResult
 import com.acuant.acuantpassiveliveness.service.AcuantPassiveLiveness
 import com.acuant.acuantpassiveliveness.service.PassiveLivenessListener
+import com.acuant.acuantcamera.camera.AcuantCameraActivity
+import com.acuant.acuantcamera.camera.AcuantCameraOptions
+import com.acuant.acuantcamera.constant.ACUANT_EXTRA_CAMERA_OPTIONS
+import com.acuant.acuantcamera.constant.ACUANT_EXTRA_PDF417_BARCODE
+import com.acuant.acuantimagepreparation.AcuantImagePreparation
+import com.acuant.acuantimagepreparation.model.AcuantImage
+import com.acuant.acuantimagepreparation.initializer.EvaluateImageListener
+import com.acuant.acuantdocumentprocessing.AcuantDocumentProcessing
+import com.acuant.acuantdocumentprocessing.model.IdInstanceOptions
+import com.acuant.acuantdocumentprocessing.model.EvaluatedImageData
+import com.acuant.acuantdocumentprocessing.model.AcuantIdDocumentInstance
+import com.acuant.acuantdocumentprocessing.listener.*
 import com.facebook.react.bridge.*
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -46,9 +58,16 @@ class AcuantSdkModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
   private var faceCapturePromise: Promise? = null
+  private var documentCapturePromise: Promise? = null
+  private var capturedFrontImage: Bitmap? = null
+  private var capturedBackImage: Bitmap? = null
+  private var capturedBarcodeString: String? = null
+  private var documentInstance: AcuantIdDocumentInstance? = null
+  private var capturingFrontSide = true
 
   companion object {
     private const val FACE_CAPTURE_REQUEST_CODE = 1001
+    private const val DOCUMENT_CAPTURE_REQUEST_CODE = 1002
   }
 
   override fun getName(): String {
@@ -333,6 +352,220 @@ class AcuantSdkModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  // MARK: - Document Capture and Processing (Phase 2)
+
+  @ReactMethod
+  fun captureAndProcessDocument(options: ReadableMap, promise: Promise) {
+    val activity = currentActivity
+    if (activity == null) {
+      promise.reject("NO_ACTIVITY", "Current activity is null")
+      return
+    }
+
+    try {
+      documentCapturePromise = promise
+      capturedFrontImage = null
+      capturedBackImage = null
+      capturedBarcodeString = null
+      capturingFrontSide = true
+
+      launchDocumentCamera(activity)
+
+    } catch (e: Exception) {
+      promise.reject("CAPTURE_ERROR", e.message, e)
+    }
+  }
+
+  private fun launchDocumentCamera(activity: Activity) {
+    val cameraIntent = Intent(activity, AcuantCameraActivity::class.java)
+    cameraIntent.putExtra(ACUANT_EXTRA_CAMERA_OPTIONS,
+      AcuantCameraOptions
+        .DocumentCameraOptionsBuilder()
+        .build()
+    )
+    activity.startActivityForResult(cameraIntent, DOCUMENT_CAPTURE_REQUEST_CODE)
+  }
+
+  private fun processDocument() {
+    val promise = documentCapturePromise ?: return
+    val frontImage = capturedFrontImage
+
+    if (frontImage == null) {
+      promise.reject("NO_FRONT_IMAGE", "Front image not captured")
+      cleanupDocumentCapture()
+      return
+    }
+
+    // Evaluate front image quality
+    AcuantImagePreparation.evaluateImage(frontImage, object : EvaluateImageListener {
+      override fun onSuccess(image: AcuantImage) {
+        // Check image quality
+        if (image.sharpness < 50) {
+          promise.reject("IMAGE_TOO_BLURRY", "Image is too blurry (sharpness: ${image.sharpness})")
+          cleanupDocumentCapture()
+          return
+        }
+
+        if (image.glare < 50) {
+          promise.reject("IMAGE_HAS_GLARE", "Image has too much glare (glare: ${image.glare})")
+          cleanupDocumentCapture()
+          return
+        }
+
+        // Create document instance
+        val instanceOptions = IdInstanceOptions()
+
+        AcuantDocumentProcessing.createInstance(instanceOptions, object : CreateIdInstanceListener {
+          override fun instanceCreated(instance: AcuantIdDocumentInstance) {
+            documentInstance = instance
+            uploadFrontImage(image)
+          }
+
+          override fun onError(error: AcuantError) {
+            promise.reject("CREATE_INSTANCE_FAILED", error.errorDescription ?: "Failed to create instance")
+            cleanupDocumentCapture()
+          }
+        })
+      }
+
+      override fun onError(error: AcuantError) {
+        promise.reject("IMAGE_EVALUATION_FAILED", error.errorDescription ?: "Failed to evaluate image")
+        cleanupDocumentCapture()
+      }
+    })
+  }
+
+  private fun uploadFrontImage(image: AcuantImage) {
+    val promise = documentCapturePromise ?: return
+    val instance = documentInstance
+
+    if (instance == null) {
+      promise.reject("NO_INSTANCE", "Document instance not created")
+      cleanupDocumentCapture()
+      return
+    }
+
+    val uploadData = EvaluatedImageData(image.rawBytes)
+
+    instance.uploadFrontImage(uploadData, object : UploadImageListener {
+      override fun imageUploaded() {
+        // Check if we have a back image to upload
+        val backImage = capturedBackImage
+        if (backImage != null) {
+          evaluateAndUploadBackImage(backImage)
+        } else {
+          // No back image - process with front only
+          getDocumentData()
+        }
+      }
+
+      override fun onError(error: AcuantError) {
+        promise.reject("UPLOAD_FRONT_FAILED", error.errorDescription ?: "Failed to upload front image")
+        cleanupDocumentCapture()
+      }
+    })
+  }
+
+  private fun evaluateAndUploadBackImage(backImage: Bitmap) {
+    val promise = documentCapturePromise ?: return
+    val instance = documentInstance
+
+    if (instance == null) {
+      promise.reject("NO_INSTANCE", "Document instance not created")
+      cleanupDocumentCapture()
+      return
+    }
+
+    AcuantImagePreparation.evaluateImage(backImage, object : EvaluateImageListener {
+      override fun onSuccess(image: AcuantImage) {
+        val uploadData = EvaluatedImageData(image.rawBytes)
+
+        instance.uploadBackImage(uploadData, object : UploadImageListener {
+          override fun imageUploaded() {
+            getDocumentData()
+          }
+
+          override fun onError(error: AcuantError) {
+            promise.reject("UPLOAD_BACK_FAILED", error.errorDescription ?: "Failed to upload back image")
+            cleanupDocumentCapture()
+          }
+        })
+      }
+
+      override fun onError(error: AcuantError) {
+        promise.reject("IMAGE_EVALUATION_FAILED", error.errorDescription ?: "Failed to evaluate back image")
+        cleanupDocumentCapture()
+      }
+    })
+  }
+
+  private fun getDocumentData() {
+    val promise = documentCapturePromise ?: return
+    val instance = documentInstance
+
+    if (instance == null) {
+      promise.reject("NO_INSTANCE", "Document instance not created")
+      cleanupDocumentCapture()
+      return
+    }
+
+    instance.getData(object : GetIdDataListener {
+      override fun processingResultReceived(result: com.acuant.acuantdocumentprocessing.model.IDResult) {
+        val resultMap = Arguments.createMap()
+
+        // Add captured images
+        capturedFrontImage?.let {
+          resultMap.putString("frontImage", bitmapToBase64(it))
+        }
+
+        capturedBackImage?.let {
+          resultMap.putString("backImage", bitmapToBase64(it))
+        }
+
+        // Add OCR data (flat structure)
+        result.name?.let { resultMap.putString("fullName", it) }
+        result.firstName?.let { resultMap.putString("firstName", it) }
+        result.lastName?.let { resultMap.putString("lastName", it) }
+        result.dateOfBirth?.let { resultMap.putString("dateOfBirth", it) }
+        result.documentNumber?.let { resultMap.putString("documentNumber", it) }
+        result.expirationDate?.let { resultMap.putString("expirationDate", it) }
+        result.issueDate?.let { resultMap.putString("issueDate", it) }
+        result.address?.let { resultMap.putString("address", it) }
+        result.country?.let { resultMap.putString("country", it) }
+        result.nationality?.let { resultMap.putString("nationality", it) }
+        result.sex?.let { resultMap.putString("sex", it) }
+
+        // Metadata
+        resultMap.putBoolean("isProcessed", true)
+        resultMap.putString("documentType", result.type ?: "Unknown")
+        result.classification?.let { resultMap.putString("classificationDetails", it) }
+
+        promise.resolve(resultMap)
+        cleanupDocumentCapture()
+
+        // Delete instance
+        instance.deleteInstance(object : DeleteListener {
+          override fun instanceDeleted() {}
+          override fun onError(error: AcuantError) {}
+        })
+      }
+
+      override fun onError(error: AcuantError) {
+        promise.reject("GET_DATA_FAILED", error.errorDescription ?: "Failed to get document data")
+        cleanupDocumentCapture()
+      }
+    })
+  }
+
+  private fun cleanupDocumentCapture() {
+    documentCapturePromise = null
+    capturedFrontImage = null
+    capturedBackImage = null
+    capturedBarcodeString = null
+    documentInstance = null
+    capturingFrontSide = true
+  }
+
   // MARK: - Activity Result Handling
 
   private val activityEventListener = object : BaseActivityEventListener() {
@@ -342,8 +575,9 @@ class AcuantSdkModule(reactContext: ReactApplicationContext) :
       resultCode: Int,
       data: Intent?
     ) {
-      if (requestCode == FACE_CAPTURE_REQUEST_CODE) {
-        handleFaceCaptureResult(resultCode, data)
+      when (requestCode) {
+        FACE_CAPTURE_REQUEST_CODE -> handleFaceCaptureResult(resultCode, data)
+        DOCUMENT_CAPTURE_REQUEST_CODE -> handleDocumentCaptureResult(resultCode, data)
       }
     }
   }
@@ -394,6 +628,83 @@ class AcuantSdkModule(reactContext: ReactApplicationContext) :
       else -> {
         promise.reject("CAPTURE_FAILED", "Face capture failed with result code: $resultCode")
       }
+    }
+  }
+
+  private fun handleDocumentCaptureResult(resultCode: Int, data: Intent?) {
+    val promise = documentCapturePromise ?: return
+    val activity = currentActivity ?: return
+
+    when (resultCode) {
+      Activity.RESULT_OK -> {
+        try {
+          val bytes = AcuantCameraActivity.getLatestCapturedBytes()
+          val barcodeString = data?.getStringExtra(ACUANT_EXTRA_PDF417_BARCODE)
+
+          if (bytes == null || bytes.isEmpty()) {
+            promise.reject("CAPTURE_FAILED", "No image data returned from camera")
+            cleanupDocumentCapture()
+            return
+          }
+
+          val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+          if (bitmap == null) {
+            promise.reject("IMAGE_CONVERSION_FAILED", "Failed to decode captured image")
+            cleanupDocumentCapture()
+            return
+          }
+
+          if (capturingFrontSide) {
+            // Captured front side
+            capturedFrontImage = bitmap
+            capturedBarcodeString = barcodeString
+            capturingFrontSide = false
+
+            // Prompt for back side
+            promptForBackSideCapture(activity)
+          } else {
+            // Captured back side
+            capturedBackImage = bitmap
+
+            // Process document with both sides
+            processDocument()
+          }
+
+        } catch (e: Exception) {
+          promise.reject("CAPTURE_ERROR", "Failed to process captured image: ${e.message}", e)
+          cleanupDocumentCapture()
+        }
+      }
+      Activity.RESULT_CANCELED -> {
+        promise.reject("USER_CANCELED", "User canceled document capture")
+        cleanupDocumentCapture()
+      }
+      else -> {
+        promise.reject("CAPTURE_FAILED", "Document capture failed with result code: $resultCode")
+        cleanupDocumentCapture()
+      }
+    }
+  }
+
+  private fun promptForBackSideCapture(activity: Activity) {
+    activity.runOnUiThread {
+      val alertDialog = android.app.AlertDialog.Builder(activity)
+        .setTitle("Capture Back Side?")
+        .setMessage("Do you want to capture the back side of the document?")
+        .setPositiveButton("Yes") { _, _ ->
+          launchDocumentCamera(activity)
+        }
+        .setNeutralButton("No (Front Only)") { _, _ ->
+          processDocument()
+        }
+        .setNegativeButton("Cancel") { _, _ ->
+          documentCapturePromise?.reject("USER_CANCELED", "User canceled document capture")
+          cleanupDocumentCapture()
+        }
+        .setCancelable(false)
+        .create()
+
+      alertDialog.show()
     }
   }
 

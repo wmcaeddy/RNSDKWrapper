@@ -16,9 +16,22 @@ import AcuantImagePreparation
 import AcuantFaceCapture
 import AcuantPassiveLiveness
 import AcuantFaceMatch
+import AcuantiOSSDKV11  // For DocumentCameraViewController
+import AcuantDocumentProcessing
 
 @objc(AcuantSdk)
 class AcuantSdk: NSObject {
+
+    // MARK: - State Management
+
+    // Store document capture state for multi-step workflow
+    private var documentCapturePromise: RCTPromiseResolveBlock?
+    private var documentCaptureReject: RCTPromiseRejectBlock?
+    private var capturedFrontImage: UIImage?
+    private var capturedBackImage: UIImage?
+    private var capturedBarcodeString: String?
+    private var documentInstance: AcuantIdDocumentInstance?
+    private var capturingFrontSide = true
 
     // MARK: - Initialization
 
@@ -309,6 +322,356 @@ class AcuantSdk: NSObject {
         }
 
         Credential.setEndpoints(endpoints: endpoints)
+    }
+
+    // MARK: - Document Capture and Processing (Phase 2)
+
+    @objc
+    func captureAndProcessDocument(_ options: NSDictionary,
+                                   resolver resolve: @escaping RCTPromiseResolveBlock,
+                                   rejecter reject: @escaping RCTPromiseRejectBlock) {
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // Reset state
+            self.documentCapturePromise = resolve
+            self.documentCaptureReject = reject
+            self.capturedFrontImage = nil
+            self.capturedBackImage = nil
+            self.capturedBarcodeString = nil
+            self.capturingFrontSide = true
+
+            self.launchDocumentCamera()
+        }
+    }
+
+    private func launchDocumentCamera() {
+        guard let rootViewController = getRootViewController() else {
+            documentCaptureReject?("NO_VIEW_CONTROLLER", "Unable to get root view controller", nil)
+            cleanup()
+            return
+        }
+
+        // Configure camera options
+        let textForState: (DocumentCameraState) -> String = { state in
+            switch state {
+            case .align: return "ALIGN DOCUMENT"
+            case .moveCloser: return "MOVE CLOSER"
+            case .tooClose: return "TOO CLOSE"
+            case .steady: return "HOLD STEADY"
+            case .hold: return "HOLD"
+            case .capture: return "CAPTURING"
+            @unknown default: return ""
+            }
+        }
+
+        let options = DocumentCameraOptions(autoCapture: true, hideNavigationBar: false, textForState: textForState)
+        let documentCameraViewController = DocumentCameraViewController(options: options)
+        documentCameraViewController.delegate = self
+
+        // Present with navigation controller for back button
+        let navController = UINavigationController(rootViewController: documentCameraViewController)
+        navController.modalPresentationStyle = .fullScreen
+        rootViewController.present(navController, animated: true, completion: nil)
+    }
+
+    private func processDocument() {
+        guard let frontImage = capturedFrontImage else {
+            documentCaptureReject?("NO_FRONT_IMAGE", "Front image not captured", nil)
+            cleanup()
+            return
+        }
+
+        // Evaluate front image quality
+        guard let frontImageData = imageToJpegData(frontImage, quality: 1.0) else {
+            documentCaptureReject?("IMAGE_CONVERSION_FAILED", "Failed to convert front image", nil)
+            cleanup()
+            return
+        }
+
+        let cropOptions = CroppingData()
+        ImagePreparation.evaluateImage(data: frontImageData, cropping: cropOptions) { [weak self] image, error in
+            guard let self = self else { return }
+
+            if let err = error {
+                self.documentCaptureReject?("IMAGE_EVALUATION_FAILED", err.errorDescription ?? "Failed to evaluate image", nil)
+                self.cleanup()
+                return
+            }
+
+            guard let evaluatedImage = image else {
+                self.documentCaptureReject?("IMAGE_EVALUATION_FAILED", "No image returned from evaluation", nil)
+                self.cleanup()
+                return
+            }
+
+            // Check image quality
+            if evaluatedImage.sharpness < 50 {
+                self.documentCaptureReject?("IMAGE_TOO_BLURRY", "Image is too blurry (sharpness: \\(evaluatedImage.sharpness))", nil)
+                self.cleanup()
+                return
+            }
+
+            if evaluatedImage.glare < 50 {
+                self.documentCaptureReject?("IMAGE_HAS_GLARE", "Image has too much glare (glare: \\(evaluatedImage.glare))", nil)
+                self.cleanup()
+                return
+            }
+
+            // Create document instance
+            let instanceOptions = IdOptions()
+
+            DocumentProcessing.createInstance(options: instanceOptions, callback: { [weak self] result in
+                guard let self = self else { return }
+
+                if let err = result.error {
+                    self.documentCaptureReject?("CREATE_INSTANCE_FAILED", err.errorDescription ?? "Failed to create instance", nil)
+                    self.cleanup()
+                    return
+                }
+
+                guard let instance = result.instance else {
+                    self.documentCaptureReject?("CREATE_INSTANCE_FAILED", "No instance returned", nil)
+                    self.cleanup()
+                    return
+                }
+
+                self.documentInstance = instance
+                self.uploadFrontImage(evaluatedImage)
+            })
+        }
+    }
+
+    private func uploadFrontImage(_ image: Image) {
+        guard let instance = documentInstance else {
+            documentCaptureReject?("NO_INSTANCE", "Document instance not created", nil)
+            cleanup()
+            return
+        }
+
+        let uploadData = EvaluatedImageData(image: image)
+
+        instance.uploadFront(evaluatedImageData: uploadData, callback: { [weak self] result in
+            guard let self = self else { return }
+
+            if let err = result.error {
+                self.documentCaptureReject?("UPLOAD_FRONT_FAILED", err.errorDescription ?? "Failed to upload front image", nil)
+                self.cleanup()
+                return
+            }
+
+            // Check if we have a back image to upload
+            if let backImage = self.capturedBackImage {
+                self.evaluateAndUploadBackImage(backImage)
+            } else {
+                // No back image - process with front only (e.g., passport)
+                self.getDocumentData()
+            }
+        })
+    }
+
+    private func evaluateAndUploadBackImage(_ backImage: UIImage) {
+        guard let instance = documentInstance else {
+            documentCaptureReject?("NO_INSTANCE", "Document instance not created", nil)
+            cleanup()
+            return
+        }
+
+        guard let backImageData = imageToJpegData(backImage, quality: 1.0) else {
+            documentCaptureReject?("IMAGE_CONVERSION_FAILED", "Failed to convert back image", nil)
+            cleanup()
+            return
+        }
+
+        let cropOptions = CroppingData()
+        ImagePreparation.evaluateImage(data: backImageData, cropping: cropOptions) { [weak self] image, error in
+            guard let self = self else { return }
+
+            if let err = error {
+                self.documentCaptureReject?("IMAGE_EVALUATION_FAILED", err.errorDescription ?? "Failed to evaluate back image", nil)
+                self.cleanup()
+                return
+            }
+
+            guard let evaluatedImage = image else {
+                self.documentCaptureReject?("IMAGE_EVALUATION_FAILED", "No back image returned from evaluation", nil)
+                self.cleanup()
+                return
+            }
+
+            let uploadData = EvaluatedImageData(image: evaluatedImage)
+
+            instance.uploadBack(evaluatedImageData: uploadData, callback: { [weak self] result in
+                guard let self = self else { return }
+
+                if let err = result.error {
+                    self.documentCaptureReject?("UPLOAD_BACK_FAILED", err.errorDescription ?? "Failed to upload back image", nil)
+                    self.cleanup()
+                    return
+                }
+
+                self.getDocumentData()
+            })
+        }
+    }
+
+    private func getDocumentData() {
+        guard let instance = documentInstance else {
+            documentCaptureReject?("NO_INSTANCE", "Document instance not created", nil)
+            cleanup()
+            return
+        }
+
+        instance.getData(callback: { [weak self] result in
+            guard let self = self else { return }
+
+            if let err = result.error {
+                self.documentCaptureReject?("GET_DATA_FAILED", err.errorDescription ?? "Failed to get document data", nil)
+                self.cleanup()
+                return
+            }
+
+            guard let idResult = result.result else {
+                self.documentCaptureReject?("GET_DATA_FAILED", "No data returned", nil)
+                self.cleanup()
+                return
+            }
+
+            // Build response dictionary
+            var resultDict: [String: Any] = [:]
+
+            // Add captured images
+            if let frontImage = self.capturedFrontImage,
+               let frontJpeg = self.imageToJpegData(frontImage, quality: 0.8) {
+                resultDict["frontImage"] = self.dataToBase64(frontJpeg)
+            }
+
+            if let backImage = self.capturedBackImage,
+               let backJpeg = self.imageToJpegData(backImage, quality: 0.8) {
+                resultDict["backImage"] = self.dataToBase64(backJpeg)
+            }
+
+            // Add OCR data (flat structure)
+            if let name = idResult.name {
+                resultDict["fullName"] = name
+            }
+            if let firstName = idResult.firstName {
+                resultDict["firstName"] = firstName
+            }
+            if let lastName = idResult.lastName {
+                resultDict["lastName"] = lastName
+            }
+            if let dob = idResult.dateOfBirth {
+                resultDict["dateOfBirth"] = dob
+            }
+            if let docNumber = idResult.documentNumber {
+                resultDict["documentNumber"] = docNumber
+            }
+            if let expDate = idResult.expirationDate {
+                resultDict["expirationDate"] = expDate
+            }
+            if let issueDate = idResult.issueDate {
+                resultDict["issueDate"] = issueDate
+            }
+            if let address = idResult.address {
+                resultDict["address"] = address
+            }
+            if let country = idResult.country {
+                resultDict["country"] = country
+            }
+            if let nationality = idResult.nationality {
+                resultDict["nationality"] = nationality
+            }
+            if let sex = idResult.sex {
+                resultDict["sex"] = sex
+            }
+
+            // Metadata
+            resultDict["isProcessed"] = true
+            resultDict["documentType"] = idResult.type ?? "Unknown"
+            if let classification = idResult.classification {
+                resultDict["classificationDetails"] = classification
+            }
+
+            self.documentCapturePromise?(resultDict)
+            self.cleanup()
+
+            // Delete instance
+            instance.deleteInstance(callback: { _ in })
+        })
+    }
+
+    private func cleanup() {
+        documentCapturePromise = nil
+        documentCaptureReject = nil
+        capturedFrontImage = nil
+        capturedBackImage = nil
+        capturedBarcodeString = nil
+        documentInstance = nil
+        capturingFrontSide = true
+    }
+}
+
+// MARK: - DocumentCameraViewControllerDelegate
+
+extension AcuantSdk: DocumentCameraViewControllerDelegate {
+    func onCaptured(image: Image, barcodeString: String?) {
+        // Dismiss camera
+        getRootViewController()?.dismiss(animated: true) { [weak self] in
+            guard let self = self else { return }
+
+            if let capturedImage = image.image {
+                if self.capturingFrontSide {
+                    // Captured front side
+                    self.capturedFrontImage = capturedImage
+                    self.capturedBarcodeString = barcodeString
+                    self.capturingFrontSide = false
+
+                    // Ask user if they want to capture back side
+                    self.promptForBackSideCapture()
+                } else {
+                    // Captured back side
+                    self.capturedBackImage = capturedImage
+
+                    // Process document with both sides
+                    self.processDocument()
+                }
+            } else {
+                // User cancelled
+                self.documentCaptureReject?("USER_CANCELED", "User canceled document capture", nil)
+                self.cleanup()
+            }
+        }
+    }
+
+    private func promptForBackSideCapture() {
+        guard let rootViewController = getRootViewController() else {
+            // No back side - process with front only
+            processDocument()
+            return
+        }
+
+        let alert = UIAlertController(
+            title: "Capture Back Side?",
+            message: "Do you want to capture the back side of the document?",
+            preferredStyle: .alert
+        )
+
+        alert.addAction(UIAlertAction(title: "Yes", style: .default) { [weak self] _ in
+            self?.launchDocumentCamera()
+        })
+
+        alert.addAction(UIAlertAction(title: "No (Front Only)", style: .default) { [weak self] _ in
+            self?.processDocument()
+        })
+
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+            self?.documentCaptureReject?("USER_CANCELED", "User canceled document capture", nil)
+            self?.cleanup()
+        })
+
+        rootViewController.present(alert, animated: true, completion: nil)
     }
 }
 
